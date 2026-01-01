@@ -101,11 +101,10 @@ class KeyForge3DApp:
             if key_contour is None:
                 raise ValueError("Could not detect a key in the image.")
 
-            # Smooth the contour to avoid jagged STL edges
-            key_contour = cv2.convexHull(key_contour)
+            # Lightly smooth the contour to reduce pixel noise while keeping bitting detail
             perimeter = cv2.arcLength(key_contour, True)
-            smoothing = 0.01 * perimeter
-            key_contour = cv2.approxPolyDP(key_contour, smoothing, True)
+            epsilon = max(0.001 * perimeter, 0.5)
+            key_contour = cv2.approxPolyDP(key_contour, epsilon, True)
 
             # Extract the key region
             x, y, w, h = cv2.boundingRect(key_contour)
