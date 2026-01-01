@@ -63,23 +63,40 @@ class KeyForge3DApp:
 
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-            # Apply Gaussian blur and edge detection
+            # Apply Gaussian blur and thresholding to get a clean silhouette
             blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            edges = cv2.Canny(blurred, 50, 150)
+            _, binary = cv2.threshold(
+                blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+            )
 
-            # Find contours
-            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # Ensure the key is the foreground (white) for contour detection
+            if cv2.countNonZero(binary) > (binary.size / 2):
+                binary = cv2.bitwise_not(binary)
 
-            # Filter contours to find the key (long, thin shape)
+            # Remove small noise and close gaps in the key outline
+            kernel = np.ones((5, 5), np.uint8)
+            binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
+            binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+
+            # Find contours on the cleaned binary image
+            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            # Filter contours to find the key (long, thin shape) by area and aspect ratio
             key_contour = None
+            max_area = 0
             for contour in contours:
-                perimeter = cv2.arcLength(contour, True)
-                approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
+                area = cv2.contourArea(contour)
+                if area < 1000:
+                    continue
+
                 x, y, w, h = cv2.boundingRect(contour)
-                aspect_ratio = w / float(h)
-                if 2 < aspect_ratio < 5 and w > 100:  # Adjust these values based on your image
+                major = max(w, h)
+                minor = min(w, h) if min(w, h) != 0 else 1
+                aspect_ratio = major / float(minor)
+
+                if 2 <= aspect_ratio <= 8 and area > max_area:
                     key_contour = contour
-                    break
+                    max_area = area
 
             if key_contour is None:
                 raise ValueError("Could not detect a key in the image.")
