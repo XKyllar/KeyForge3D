@@ -59,5 +59,4 @@ python3 -m http.server 8000   # then open http://localhost:8000
 
 - Reminders / notifications
 - Due dates & recurring tasks ("pay rent every 1st")
-
 - Rewards shop: spend XP on treats you define
