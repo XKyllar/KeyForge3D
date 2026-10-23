@@ -18,6 +18,16 @@ Finishing tasks gives **+10 XP**, habits **+5 XP**, inbox zero **+20 XP**. Every
 section headers, loose jot-downs go to the Inbox, and runs of tracking numbers get bundled into one
 "📦 Track packages" task with the numbers in its note. You get a preview to uncheck anything first.
 
+## Screenshots → notes
+
+In the **＋ Brain dump** sheet, tap **📷 Add a screenshot** (or paste an image on a PC), optionally type a few words,
+and tap **Add**. The app reads it and creates a task, then opens it so you can tweak it.
+
+- **Basic reading** (default, free): on-device text recognition copies the text off the image.
+- **Smart reading** (⚙️ → Reading screenshots): add your own Anthropic API key and Claude writes a clean title,
+  keeps only the useful details (dates, prices, addresses, order numbers), pulls out links, and picks the list.
+  Roughly 2–3¢ per screenshot. The key is stored only on that device and is never synced or backed up.
+
 ## Phone + PC sync
 
 **⚙️ Settings → Sync between devices.** Make a GitHub token with only the `gist` permission, paste it in,

@@ -1,6 +1,6 @@
 // Offline support: always try the network first (so updates show up right away),
 // fall back to the cached copy when offline or the network is too slow.
-const CACHE = 'questlog-v4';
+const CACHE = 'questlog-v5';
 const ASSETS = [
   './',
   './index.html',

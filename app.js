@@ -5,7 +5,7 @@
    Everything is stored in localStorage on the device. No accounts, no server.
    ========================================================================= */
 
-const APP_VERSION = '4'; // bump together with CACHE in sw.js
+const APP_VERSION = '5'; // bump together with CACHE in sw.js
 const STORAGE_KEY = 'questlog.v1';
 const XP_TASK = 10;
 const XP_HABIT = 5;
@@ -473,9 +473,17 @@ function openCapture(dest) {
   openSheet(`
     <h2>Brain dump</h2>
     <textarea id="capText" rows="4" placeholder="Anything on your mind…&#10;One thing per line."></textarea>
+    <div id="capShot" class="shot-preview" hidden>
+      <img id="capImg" alt="Attached screenshot">
+      <button class="shot-remove" data-action="removeShot" aria-label="Remove screenshot">✕</button>
+    </div>
+    <label class="action shot-btn" id="shotBtn">📷 Add a screenshot
+      <input type="file" id="capFile" accept="image/*" hidden>
+    </label>
     <div class="chips" id="capDest" data-dest="${selected}">${destChips(selected)}</div>
     <button class="primary" data-action="saveCapture">Add</button>`,
   (root) => $('#capText', root).focus());
+  pendingShot = null;
 }
 
 function openItem(id) {
@@ -572,6 +580,8 @@ function openSettings() {
     <p class="hint" style="margin:0 0 12px">Level ${level()} · ${S.xp} XP total · ${total} task${total === 1 ? '' : 's'} completed all-time</p>
     <h3>Sync between devices</h3>
     <div id="syncPanel">${syncPanelHtml()}</div>
+    <h3>Reading screenshots</h3>
+    <div id="aiPanel">${aiPanelHtml()}</div>
     <h3>Data</h3>
     <div class="actions">
       <button class="action" data-action="openImport">📋 Import from Apple Notes</button>
@@ -925,6 +935,202 @@ function syncPanelHtml() {
     </div>`;
 }
 
+/* ---------- screenshot reading ---------- */
+
+// Smart mode: Claude reads the screenshot (needs the person's own Anthropic API key, kept on this device only).
+// Basic mode: free on-device text recognition (Tesseract), no key needed.
+const AI_KEY_STORAGE = 'questlog.ai';
+const AI_MODEL = 'claude-opus-5-5';
+const ANTHROPIC_SDK_URL = 'https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@0.132.1/+esm';
+const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js';
+const KEYS_URL = 'https://console.anthropic.com/settings/keys';
+const MAX_IMAGE_EDGE = 1568; // larger images are downscaled by the API anyway
+
+let aiKey = (() => {
+  try { return localStorage.getItem(AI_KEY_STORAGE) || ''; } catch (e) { return ''; }
+})();
+let pendingShot = null; // { dataUrl, base64 } while the brain-dump sheet has a screenshot attached
+
+async function loadScreenshot(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(img.naturalWidth, img.naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(img.naturalWidth * scale);
+    canvas.height = Math.round(img.naturalHeight * scale);
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    return { dataUrl, base64: dataUrl.split(',')[1] };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+let anthropicModule;
+async function anthropicClient() {
+  anthropicModule = anthropicModule || (await import(ANTHROPIC_SDK_URL));
+  const Anthropic = anthropicModule.default;
+  // The key is the person's own and lives only on their device, so browser use is intended here.
+  return new Anthropic({ apiKey: aiKey, dangerouslyAllowBrowser: true });
+}
+
+function friendlyAIError(err) {
+  const m = anthropicModule || {};
+  if (m.AuthenticationError && err instanceof m.AuthenticationError) return 'Your Anthropic key was rejected. Check it in Settings.';
+  if (m.PermissionDeniedError && err instanceof m.PermissionDeniedError) return "That Anthropic key isn't allowed to do this.";
+  if (m.RateLimitError && err instanceof m.RateLimitError) return 'Claude is busy. Try again in a minute.';
+  if (m.APIConnectionError && err instanceof m.APIConnectionError) return "Couldn't reach Claude. Are you online?";
+  if (m.APIError && err instanceof m.APIError && /credit|billing/i.test(err.message)) return 'Your Anthropic account is out of credit.';
+  return err.message || 'Something went wrong reading that.';
+}
+
+const SHOT_SYSTEM = `You turn a screenshot into one entry for a personal to-do and notes app. The person sends a screenshot of something they want to remember or act on, sometimes with a few words of their own about why.
+
+Return JSON with:
+- title: a short, specific title (under 60 characters). Phrase it as something to do when that fits, e.g. "Book flight to Phoenix" or "Try the miso salmon recipe". If the person wrote something, build the title around their words.
+- note: the details worth keeping from the screenshot, as plain text in short lines: names, dates, times, prices, addresses, phone numbers, order or tracking numbers, codes, steps. No markdown. Skip interface clutter like the status bar, menus and ads. Use an empty string if there is nothing beyond the title.
+- list: the id of the list it fits best, or "inbox" if unsure.
+- links: full URLs visible in the screenshot (add https:// if it's missing). Empty array if none.`;
+
+async function readScreenshotSmart(shot, details) {
+  const client = await anthropicClient();
+  const listIds = S.lists.map((l) => l.id);
+  const response = await client.beta.messages.create({
+    model: AI_MODEL,
+    max_tokens: 16000,
+    betas: ['server-side-fallback-2026-07-01'],
+    fallbacks: 'default',
+    output_config: {
+      effort: 'low',
+      format: {
+        type: 'json_schema',
+        schema: {
+          type: 'object',
+          properties: {
+            title: { type: 'string' },
+            note: { type: 'string' },
+            list: { type: 'string', enum: ['inbox', ...listIds] },
+            links: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['title', 'note', 'list', 'links'],
+          additionalProperties: false,
+        },
+      },
+    },
+    system: `${SHOT_SYSTEM}\n\nThe lists are:\n${S.lists.map((l) => `- ${l.id}: ${l.name}`).join('\n')}\n\nToday is ${new Date().toDateString()}.`,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: shot.base64 } },
+        { type: 'text', text: details ? `My notes: ${details}` : 'No notes from me, just the screenshot.' },
+      ],
+    }],
+  });
+  if (response.stop_reason === 'refusal') throw new Error("Claude couldn't help with that screenshot.");
+  if (response.stop_reason === 'max_tokens') throw new Error('That screenshot was too much to read. Try cropping it.');
+  const text = response.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+  const result = JSON.parse(text);
+  return { ...result, list: result.list === 'inbox' ? null : result.list };
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error("Couldn't load the text reader. Are you online?"));
+    document.head.appendChild(s);
+  });
+}
+
+async function readScreenshotBasic(shot, details, onProgress) {
+  await loadScript(TESSERACT_URL);
+  const { data } = await window.Tesseract.recognize(shot.dataUrl, 'eng', {
+    logger: (m) => { if (m.status === 'recognizing text') onProgress(Math.round(m.progress * 100)); },
+  });
+  const lines = data.text.split('\n').map((l) => l.trim())
+    .filter((l) => /[A-Za-z0-9]{2,}/.test(l) && !/^\d{1,2}:\d{2}\b.{0,12}$/.test(l)); // drop the status-bar clock
+  const firstReal = lines.find((l) => /[A-Za-z]{3,}/.test(l) && l.length > 4);
+  const title = details.split('\n')[0].trim() || (firstReal || 'Screenshot note').slice(0, 80);
+  const rest = details.split('\n').slice(1).join('\n').trim();
+  return { title, note: [rest, lines.join('\n')].filter(Boolean).join('\n\n').slice(0, 4000), list: null, links: [] };
+}
+
+function aiPanelHtml() {
+  if (aiKey) {
+    return `
+      <p class="hint" style="margin-top:0">✨ <b>Smart reading is on.</b> Claude picks a title, pulls out the details and links, and files it in the right list. About 2–3¢ per screenshot, billed to your Anthropic account.</p>
+      <button class="action" data-action="removeAiKey" style="width:100%">Turn off smart reading</button>`;
+  }
+  return `
+    <p class="hint" style="margin-top:0">Screenshots use <b>basic reading</b> right now: free, it just copies the text off the image.</p>
+    <p class="hint">For <b>smart reading</b> (Claude writes a clean title, keeps only the useful details and links, and picks the list), add an Anthropic API key. Costs about 2–3¢ per screenshot.</p>
+    <ol class="steps">
+      <li><a class="link" href="${KEYS_URL}" target="_blank" rel="noopener">Create a key ↗</a> (sign up and add a few dollars of credit first)</li>
+      <li>Paste it here (starts with <code>sk-ant-</code>):</li>
+    </ol>
+    <input id="aiKeyInput" placeholder="sk-ant-…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <button class="primary" data-action="saveAiKey">Turn on smart reading</button>`;
+}
+
+function showPendingShot() {
+  const wrap = $('#capShot');
+  if (!wrap) return;
+  wrap.hidden = !pendingShot;
+  $('#shotBtn').hidden = !!pendingShot;
+  if (pendingShot) $('#capImg').src = pendingShot.dataUrl;
+  $('#capText').placeholder = pendingShot ? 'Anything to add? (optional)' : "Anything on your mind…\nOne thing per line.";
+}
+
+async function attachScreenshot(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  try {
+    pendingShot = await loadScreenshot(file);
+    showPendingShot();
+  } catch (e) {
+    toast("Couldn't open that image");
+  }
+}
+
+async function saveScreenshotCapture(btn) {
+  const details = $('#capText').value.trim();
+  const destWrap = $('#capDest');
+  const dest = destWrap.dataset.dest;
+  const userPicked = destWrap.dataset.touched === '1';
+  btn.disabled = true;
+  btn.textContent = aiKey ? '✨ Reading screenshot…' : '🔍 Reading screenshot…';
+  let result;
+  try {
+    result = aiKey
+      ? await readScreenshotSmart(pendingShot, details)
+      : await readScreenshotBasic(pendingShot, details, (pct) => { btn.textContent = `🔍 Reading screenshot… ${pct}%`; });
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Try again';
+    toast(aiKey ? friendlyAIError(e) : e.message);
+    return;
+  }
+  let note = (result.note || '').trim();
+  const known = new Set(findLinks(note).map((l) => l.href));
+  for (const l of findLinks((result.links || []).join(' '))) if (!known.has(l.href)) note += `${note ? '\n' : ''}${l.href}`;
+  const aiList = listById(result.list) ? result.list : null;
+  const list = userPicked ? (dest === 'inbox' || dest === 'today' ? null : dest) : aiList;
+  const item = {
+    id: uid(), text: (result.title || 'Screenshot note').trim(), note,
+    list, today: dest === 'today' ? dayKey() : null,
+    done: false, doneAt: null, createdAt: Date.now(),
+  };
+  S.items.push(item);
+  pendingShot = null;
+  commit();
+  openItem(item.id); // show what was made so it can be tweaked
+  toast('📸 Saved from screenshot');
+}
+
 /* ---------- actions ---------- */
 
 const ACTIONS = {
@@ -940,9 +1146,16 @@ const ACTIONS = {
   pickDest(el) {
     const wrap = $('#capDest');
     wrap.dataset.dest = el.dataset.dest;
+    wrap.dataset.touched = '1';
     wrap.querySelectorAll('.chip').forEach((c) => c.classList.toggle('on', c === el));
   },
-  saveCapture() {
+  removeShot() {
+    pendingShot = null;
+    $('#capFile').value = '';
+    showPendingShot();
+  },
+  saveCapture(el) {
+    if (pendingShot) { saveScreenshotCapture(el || $('[data-action=saveCapture]')); return; }
     const lines = $('#capText').value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
     if (!lines.length) { closeSheet(); return; }
     const dest = $('#capDest').dataset.dest;
@@ -1116,6 +1329,31 @@ const ACTIONS = {
       toast('☁️ Sync is on');
     }
   },
+  async saveAiKey(el) {
+    const key = $('#aiKeyInput').value.trim();
+    if (!key) { $('#aiKeyInput').focus(); return; }
+    el.disabled = true;
+    el.textContent = 'Checking key…';
+    const previous = aiKey;
+    aiKey = key;
+    try {
+      const client = await anthropicClient();
+      await client.models.retrieve(AI_MODEL); // free call that proves the key works
+      localStorage.setItem(AI_KEY_STORAGE, key);
+      $('#aiPanel').innerHTML = aiPanelHtml();
+      toast('✨ Smart reading is on');
+    } catch (e) {
+      aiKey = previous;
+      el.disabled = false;
+      el.textContent = 'Turn on smart reading';
+      toast(friendlyAIError(e));
+    }
+  },
+  removeAiKey() {
+    aiKey = '';
+    try { localStorage.removeItem(AI_KEY_STORAGE); } catch (e) { /* ignore */ }
+    $('#aiPanel').innerHTML = aiPanelHtml();
+  },
   syncNow,
   disconnectSync() {
     if (!confirm('Stop syncing on this device? Your data stays here; other devices keep syncing.')) return;
@@ -1151,6 +1389,20 @@ document.addEventListener('click', (ev) => {
   if (!el) return;
   const fn = ACTIONS[el.dataset.action];
   if (fn) fn(el, ev);
+});
+
+document.addEventListener('change', (ev) => {
+  if (ev.target.id === 'capFile') attachScreenshot(ev.target.files[0]);
+});
+
+// Pasting an image into the brain dump attaches it as a screenshot
+document.addEventListener('paste', (ev) => {
+  if (!$('#capText')) return;
+  const file = [...(ev.clipboardData?.files || [])].find((f) => f.type.startsWith('image/'));
+  if (file) {
+    ev.preventDefault();
+    attachScreenshot(file);
+  }
 });
 
 document.addEventListener('keydown', (ev) => {
