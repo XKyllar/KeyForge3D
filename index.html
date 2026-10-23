@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Quest Log</title>
+  <meta name="description" content="A simple, gamified brain-dump, to-do and habit tracker.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Quest Log">
+  <meta name="theme-color" content="#f6f5fb" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121118" media="(prefers-color-scheme: dark)">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-row">
+      <h1 id="title">Today</h1>
+      <button class="icon-btn" data-action="settings" aria-label="Settings">⚙️</button>
+    </div>
+    <div class="level" aria-live="polite">
+      <span class="lvl" id="lvl">Lv 1</span>
+      <div class="xpbar"><span id="xpfill"></span></div>
+      <span class="xp" id="xp">0 / 100 XP</span>
+    </div>
+  </header>
+
+  <div id="installHint" class="install-hint" hidden>
+    <span>📲 Install: tap <b>Share</b> → <b>Add to Home Screen</b></span>
+    <button class="icon-btn" data-action="dismissInstall" aria-label="Dismiss">✕</button>
+  </div>
+
+  <main id="view"></main>
+
+  <button class="fab" data-action="capture" aria-label="Quick capture">＋</button>
+
+  <nav class="tabbar">
+    <button data-action="tab" data-tab="today"><span>☀️</span>Today</button>
+    <button data-action="tab" data-tab="inbox"><span>📥</span>Inbox<i class="badge" id="inboxBadge" hidden></i></button>
+    <button data-action="tab" data-tab="lists"><span>🗂</span>Lists</button>
+    <button data-action="tab" data-tab="habits"><span>🔁</span>Habits</button>
+  </nav>
+
+  <div id="sheet" class="sheet" hidden>
+    <div class="sheet-backdrop" data-action="closeSheet"></div>
+    <div class="sheet-panel" role="dialog" aria-modal="true">
+      <div class="sheet-grip"></div>
+      <div id="sheetBody"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
