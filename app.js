@@ -38,6 +38,39 @@ function addDays(d, n) {
 }
 const daysAgo = (ms) => Math.floor((Date.now() - ms) / 86400000);
 
+/* ---------- links ---------- */
+
+const URL_RE = /\b(?:https?:\/\/|www\.)[^\s<>"']+/gi;
+
+function findLinks(...texts) {
+  const out = [];
+  for (const t of texts) {
+    for (let raw of String(t || '').match(URL_RE) || []) {
+      raw = raw.replace(/[.,;:!?)\]}]+$/, ''); // trailing punctuation isn't part of the link
+      const href = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+      try {
+        const u = new URL(href);
+        if (!out.some((l) => l.href === u.href)) out.push({ href: u.href, host: u.hostname.replace(/^www\./, ''), path: u.pathname + u.search });
+      } catch (e) { /* not a real URL */ }
+    }
+  }
+  return out;
+}
+
+// Escapes text for HTML, swapping long URLs for a short "🔗 site.com" label.
+function shortText(text) {
+  let html = '';
+  let last = 0;
+  for (const m of String(text).matchAll(URL_RE)) {
+    const link = findLinks(m[0])[0];
+    html += esc(text.slice(last, m.index));
+    const trailing = (m[0].match(/[.,;:!?)\]}]+$/) || [''])[0];
+    html += link ? `<span class="linkchip">🔗 ${esc(link.host)}</span>${esc(trailing)}` : esc(m[0]);
+    last = m.index + m[0].length;
+  }
+  return html + esc(String(text).slice(last));
+}
+
 /* ---------- state ---------- */
 
 // Identifies this device so XP earned on each device can be merged during sync.
@@ -263,7 +296,7 @@ function itemRow(i, opts = {}) {
   const list = listById(i.list);
   if (opts.showList && list) meta.push(`${list.emoji} ${esc(list.name)}`);
   if (opts.showToday && i.today === dayKey() && !i.done) meta.push('☀️ Today');
-  if (i.note) meta.push('📝 note');
+  if (i.note) meta.push(findLinks(i.note).length ? '📝 note 🔗' : '📝 note');
   if (opts.showAge && !i.done) {
     const age = daysAgo(i.createdAt);
     if (age >= STALE_DAYS) meta.push(`<span class="stale">${age} days old</span>`);
@@ -272,7 +305,7 @@ function itemRow(i, opts = {}) {
     <li class="item ${i.done ? 'done' : ''}">
       <button class="check" data-action="toggle" data-id="${i.id}" aria-label="${i.done ? 'Mark not done' : 'Mark done'}"></button>
       <button class="body" data-action="openItem" data-id="${i.id}">
-        <span class="text">${esc(i.text)}</span>
+        <span class="text">${shortText(i.text)}</span>
         ${meta.length ? `<span class="meta">${meta.join(' · ')}</span>` : ''}
       </button>
       ${opts.extra ? opts.extra(i) : ''}
@@ -448,10 +481,14 @@ function openItem(id) {
   const i = itemById(id);
   if (!i) return;
   const onToday = i.today === dayKey() && !i.done;
+  const links = findLinks(i.text, i.note);
+  const shortPath = (p) => (p.length > 28 ? `${p.slice(0, 27)}…` : p === '/' ? '' : p);
   openSheet(`
-    <h2>${esc(i.text)}</h2>
-    ${i.note ? `<div class="note">${esc(i.note)}</div>` : ''}
+    <h2>${shortText(i.text)}</h2>
+    ${i.note ? `<div class="note">${shortText(i.note)}</div>` : ''}
     <div class="actions" style="margin-top:12px">
+      ${links.map((l) => `<a class="action link-action" href="${esc(l.href)}" target="_blank" rel="noopener">🔗 Go to link
+        <small>${esc(l.host)}${esc(shortPath(l.path))}</small></a>`).join('')}
       ${i.done ? '' : onToday
         ? `<button class="action" data-action="sendBack" data-id="${i.id}">🌙 Not today</button>`
         : `<button class="action" data-action="keepToday" data-id="${i.id}">☀️ Do it today</button>`}

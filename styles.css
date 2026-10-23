@@ -215,6 +215,9 @@ main { padding: 4px 16px calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 90
 
 .actions { display: grid; gap: 8px; margin-top: 4px; }
 .action { display: flex; align-items: center; gap: 10px; padding: 14px; border-radius: 14px; background: var(--bg); font-weight: 600; text-align: left; }
+.link-action { background: var(--accent-soft); color: var(--accent); text-decoration: none; flex-wrap: wrap; }
+.link-action small { flex-basis: 100%; font-weight: 500; font-size: 13px; opacity: .8; overflow-wrap: anywhere; }
+.linkchip { display: inline-block; padding: 0 7px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-size: .9em; font-weight: 600; }
 .primary { width: 100%; margin-top: 16px; padding: 15px; border-radius: 14px; background: var(--accent); color: #fff; font-weight: 700; font-size: 17px; }
 .primary:disabled { opacity: .5; }
 .danger-btn { width: 100%; margin-top: 10px; padding: 14px; border-radius: 14px; color: var(--danger); font-weight: 600; background: var(--bg); }

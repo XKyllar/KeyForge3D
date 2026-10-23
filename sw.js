@@ -1,5 +1,5 @@
 // Offline support: serve the app shell from cache, refresh it in the background.
-const CACHE = 'questlog-v2';
+const CACHE = 'questlog-v3';
 const ASSETS = [
   './',
   './index.html',
