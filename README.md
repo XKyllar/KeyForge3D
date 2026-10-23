@@ -18,6 +18,15 @@ Finishing tasks gives **+10 XP**, habits **+5 XP**, inbox zero **+20 XP**. Every
 section headers, loose jot-downs go to the Inbox, and runs of tracking numbers get bundled into one
 "📦 Track packages" task with the numbers in its note. You get a preview to uncheck anything first.
 
+## Phone + PC sync
+
+**⚙️ Settings → Sync between devices.** Make a GitHub token with only the `gist` permission, paste it in,
+and do the same on your other device. Your data is stored in a private (secret) gist named `questlog.json`.
+The app pulls changes whenever you open or switch back to it, and pushes a couple of seconds after each change.
+Edits are merged record by record (newest change wins), so using both devices offline doesn't wipe anything out.
+
+On a PC, just open the site in any browser (Chrome/Edge can also "Install" it as an app). Press **N** to brain-dump.
+
 ## Install on iPhone
 
 1. Host it (see below) and open the URL in **Safari**.
@@ -50,5 +59,5 @@ python3 -m http.server 8000   # then open http://localhost:8000
 
 - Reminders / notifications
 - Due dates & recurring tasks ("pay rent every 1st")
-- iCloud sync between devices
+
 - Rewards shop: spend XP on treats you define

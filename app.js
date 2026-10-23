@@ -40,13 +40,26 @@ const daysAgo = (ms) => Math.floor((Date.now() - ms) / 86400000);
 
 /* ---------- state ---------- */
 
+// Identifies this device so XP earned on each device can be merged during sync.
+const DEVICE = (() => {
+  try {
+    let id = localStorage.getItem('questlog.device');
+    if (!id) localStorage.setItem('questlog.device', (id = uid()));
+    return id;
+  } catch (e) {
+    return 'local';
+  }
+})();
+
 function freshState() {
   return {
     version: 1,
-    xp: 0,
-    items: [],      // { id, text, note, list (null = inbox), today (dayKey|null), done, doneAt, createdAt }
+    xp: 0,          // cached total of xpBy
+    xpBy: {},       // { deviceId: { xp, at } }
+    items: [],      // { id, text, note, list (null = inbox), today (dayKey|null), done, doneAt, createdAt, updatedAt }
     lists: clone(DEFAULT_LISTS),
-    habits: [],     // { id, name, emoji, days: [0-6] (empty = every day), log: { dayKey: true }, createdAt }
+    habits: [],     // { id, name, emoji, days: [0-6] (empty = every day), log: { dayKey: true }, createdAt, updatedAt }
+    deleted: {},    // { 'kind:id': deletedAt } so deletions sync too
     collapsed: {},
     tab: 'today',
     inboxZeroDay: null,
@@ -57,9 +70,15 @@ function freshState() {
 function load() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return Object.assign(freshState(), JSON.parse(raw));
+    if (raw) return migrate(JSON.parse(raw));
   } catch (e) { /* fall through to fresh state */ }
   return freshState();
+}
+
+function migrate(data) {
+  const s = Object.assign(freshState(), data);
+  if (!data.xpBy) s.xpBy = s.xp ? { [DEVICE]: { xp: s.xp, at: Date.now() } } : {};
+  return s;
 }
 
 let S = load();
@@ -75,8 +94,48 @@ function save() {
 
 function commit() {
   checkInboxZero();
+  stampChanges();
   save();
   render();
+  scheduleSync();
+}
+
+/* ---------- change tracking (for sync) ---------- */
+
+// Snapshot of every record as of the last commit; anything that differs gets a fresh updatedAt,
+// anything that disappeared gets a tombstone in S.deleted.
+const SYNCED_KINDS = ['items', 'lists', 'habits'];
+let snapshot = new Map();
+
+const recordBody = ({ updatedAt, ...rest }) => JSON.stringify(rest);
+
+function baseline() {
+  snapshot = new Map();
+  for (const kind of SYNCED_KINDS) for (const r of S[kind]) snapshot.set(`${kind}:${r.id}`, recordBody(r));
+}
+
+function stampChanges() {
+  const now = Date.now();
+  const seen = new Set();
+  for (const kind of SYNCED_KINDS) {
+    for (const r of S[kind]) {
+      const key = `${kind}:${r.id}`;
+      const body = recordBody(r);
+      seen.add(key);
+      if (snapshot.get(key) !== body) {
+        r.updatedAt = now;
+        snapshot.set(key, body);
+      }
+    }
+  }
+  for (const key of [...snapshot.keys()]) {
+    if (!seen.has(key)) {
+      S.deleted[key] = now;
+      snapshot.delete(key);
+    }
+  }
+  const cutoff = now - 90 * 86400000;
+  for (const [key, t] of Object.entries(S.deleted)) if (t < cutoff) delete S.deleted[key];
 }
 
 /* ---------- derived data ---------- */
@@ -113,9 +172,14 @@ function scheduleLabel(h) {
 
 /* ---------- XP + feedback ---------- */
 
+const totalXP = () => Math.max(0, Object.values(S.xpBy).reduce((sum, d) => sum + (d.xp || 0), 0));
+
 function addXP(n, ev) {
   const before = level();
-  S.xp = Math.max(0, S.xp + n);
+  const mine = S.xpBy[DEVICE] || (S.xpBy[DEVICE] = { xp: 0, at: 0 });
+  mine.xp += n;
+  mine.at = Date.now();
+  S.xp = totalXP();
   if (n > 0) {
     celebrate(ev, n);
     if (level() > before) setTimeout(() => toast(`⭐ Level up! You're level ${level()}`), 300);
@@ -467,13 +531,16 @@ function openSettings() {
   const total = S.items.filter((i) => i.done).length;
   openSheet(`
     <h2>Settings</h2>
-    <p class="hint" style="margin:0 0 12px">Level ${level()} · ${S.xp} XP total · ${total} tasks completed all-time</p>
+    <p class="hint" style="margin:0 0 12px">Level ${level()} · ${S.xp} XP total · ${total} task${total === 1 ? '' : 's'} completed all-time</p>
+    <h3>Sync between devices</h3>
+    <div id="syncPanel">${syncPanelHtml()}</div>
+    <h3>Data</h3>
     <div class="actions">
       <button class="action" data-action="openImport">📋 Import from Apple Notes</button>
       <button class="action" data-action="exportData">💾 Back up my data</button>
       <button class="action" data-action="openRestore">♻️ Restore from backup</button>
     </div>
-    <p class="hint">Your data lives only on this phone. Back it up every now and then.</p>
+    <p class="hint">A backup is a snapshot file you can keep in iCloud Drive or email to yourself.</p>
     <button class="danger-btn" data-action="resetAll">Erase everything</button>`);
 }
 
@@ -639,8 +706,8 @@ async function doRestore() {
   try {
     const data = JSON.parse(text);
     if (!Array.isArray(data.items) || !Array.isArray(data.habits)) throw new Error('bad');
-    if (!confirm('Replace everything on this phone with this backup?')) return;
-    S = Object.assign(freshState(), data);
+    if (!confirm(`Replace everything${sync.token ? ' (on all synced devices)' : ''} with this backup?`)) return;
+    S = migrate(data);
     lastInboxCount = null;
     closeSheet();
     commit();
@@ -648,6 +715,175 @@ async function doRestore() {
   } catch (e) {
     toast("That doesn't look like a Quest Log backup");
   }
+}
+
+/* ---------- sync (private GitHub gist) ---------- */
+
+const SYNC_KEY = 'questlog.sync';
+const GIST_FILE = 'questlog.json';
+const TOKEN_URL = 'https://github.com/settings/tokens/new?scopes=gist&description=Quest%20Log%20sync';
+
+let sync = (() => {
+  try { return JSON.parse(localStorage.getItem(SYNC_KEY)) || {}; } catch (e) { return {}; }
+})();
+let syncStatus = sync.token ? 'idle' : 'off'; // off | idle | syncing | ok | error
+let syncError = '';
+let syncing = false;
+let syncAgain = false;
+let syncTimer;
+
+function saveSync() {
+  try { localStorage.setItem(SYNC_KEY, JSON.stringify(sync)); } catch (e) { /* ignore */ }
+}
+
+const syncPayload = () => JSON.stringify({ version: 1, items: S.items, lists: S.lists, habits: S.habits, xpBy: S.xpBy, deleted: S.deleted });
+
+async function gh(path, opts = {}) {
+  const res = await fetch(`https://api.github.com${path}`, {
+    ...opts,
+    cache: 'no-store',
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${sync.token}`,
+      ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
+    },
+  });
+  if (res.status === 401) throw new Error('GitHub rejected the sync key. Reconnect in Settings.');
+  if (res.status === 404) throw Object.assign(new Error('Not found'), { notFound: true });
+  if (!res.ok) throw new Error(`GitHub error ${res.status}`);
+  return res.json();
+}
+
+async function findOrCreateGist() {
+  for (let page = 1; page <= 10; page++) {
+    const gists = await gh(`/gists?per_page=100&page=${page}`);
+    const found = gists.find((g) => g.files && g.files[GIST_FILE]);
+    if (found) return found.id;
+    if (gists.length < 100) break;
+  }
+  const created = await gh('/gists', {
+    method: 'POST',
+    body: JSON.stringify({ description: 'Quest Log sync data (used by the Quest Log app)', public: false, files: { [GIST_FILE]: { content: syncPayload() } } }),
+  });
+  return created.id;
+}
+
+async function readRemote() {
+  const g = await gh(`/gists/${sync.gistId}`);
+  const f = g.files[GIST_FILE];
+  if (!f) return null;
+  const content = f.truncated ? await (await fetch(f.raw_url, { cache: 'no-store' })).text() : f.content;
+  return { content, data: JSON.parse(content) };
+}
+
+// Record-by-record merge: newest updatedAt wins, tombstones win over older edits.
+function mergeState(remote) {
+  stampChanges();
+  const deleted = { ...(remote.deleted || {}) };
+  for (const [key, t] of Object.entries(S.deleted)) deleted[key] = Math.max(deleted[key] || 0, t);
+  for (const kind of SYNCED_KINDS) {
+    const byId = new Map();
+    for (const r of remote[kind] || []) byId.set(r.id, r);
+    for (const r of S[kind]) {
+      const theirs = byId.get(r.id);
+      if (!theirs || (r.updatedAt || 0) >= (theirs.updatedAt || 0)) byId.set(r.id, r);
+    }
+    S[kind] = [...byId.values()].filter((r) => !(deleted[`${kind}:${r.id}`] >= (r.updatedAt || 0)));
+  }
+  S.deleted = deleted;
+  const xpBy = { ...(remote.xpBy || {}) };
+  for (const [dev, v] of Object.entries(S.xpBy)) if (!xpBy[dev] || v.at >= xpBy[dev].at) xpBy[dev] = v;
+  S.xpBy = xpBy;
+  S.xp = totalXP();
+  baseline();
+}
+
+function scheduleSync(delay = 1500) {
+  if (!sync.token) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(syncNow, delay);
+}
+
+async function syncNow() {
+  if (!sync.token) return;
+  if (syncing) { syncAgain = true; return; }
+  syncing = true;
+  setSyncStatus('syncing');
+  try {
+    if (!sync.gistId) { sync.gistId = await findOrCreateGist(); saveSync(); }
+    let remote;
+    try {
+      remote = await readRemote();
+    } catch (e) {
+      if (!e.notFound) throw e;
+      sync.gistId = await findOrCreateGist(); // gist was deleted; find or make a new one
+      saveSync();
+      remote = await readRemote();
+    }
+    const before = syncPayload();
+    if (remote) mergeState(remote.data);
+    const merged = syncPayload();
+    if (merged !== before) {
+      lastInboxCount = null; // incoming changes shouldn't trigger the inbox-zero bonus
+      save();
+      render();
+    }
+    if (!remote || merged !== remote.content) {
+      await gh(`/gists/${sync.gistId}`, { method: 'PATCH', body: JSON.stringify({ files: { [GIST_FILE]: { content: merged } } }) });
+    }
+    sync.lastSync = Date.now();
+    saveSync();
+    setSyncStatus('ok');
+  } catch (e) {
+    setSyncStatus('error', navigator.onLine === false ? "You're offline. Will sync when you're back." : e.message);
+  } finally {
+    syncing = false;
+    if (syncAgain) { syncAgain = false; scheduleSync(300); }
+  }
+}
+
+function setSyncStatus(status, error = '') {
+  syncStatus = status;
+  syncError = error;
+  const btn = $('#syncBtn');
+  btn.hidden = status === 'off';
+  btn.textContent = { syncing: '🔄', error: '⚠️' }[status] || '☁️';
+  btn.classList.toggle('spin', status === 'syncing');
+  const panel = $('#syncPanel');
+  if (panel) panel.innerHTML = syncPanelHtml();
+}
+
+function ago(ms) {
+  const s = Math.round((Date.now() - ms) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  return new Date(ms).toLocaleDateString();
+}
+
+function syncPanelHtml() {
+  if (!sync.token) {
+    return `
+      <p class="hint" style="margin-top:0">Use Quest Log on your phone <i>and</i> PC with the same data. It's saved in a private file in your GitHub account.</p>
+      <ol class="steps">
+        <li><a class="link" href="${TOKEN_URL}" target="_blank" rel="noopener">Make a sync key on GitHub ↗</a></li>
+        <li>Set <b>Expiration</b> to <b>No expiration</b>, scroll down and tap <b>Generate token</b>.</li>
+        <li>Copy the key (starts with <code>ghp_</code>) and paste it here:</li>
+      </ol>
+      <input id="syncToken" placeholder="ghp_…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <button class="primary" data-action="connectSync">Connect</button>
+      <p class="hint">Then do the same on your other device. Each device can have its own key.</p>`;
+  }
+  const line = {
+    syncing: '🔄 Syncing…',
+    error: `⚠️ ${esc(syncError)}`,
+  }[syncStatus] || `☁️ Synced${sync.lastSync ? ` · ${ago(sync.lastSync)}` : ''}`;
+  return `
+    <p class="hint" style="margin-top:0">${line}</p>
+    <div class="row">
+      <button class="action" data-action="syncNow">🔄 Sync now</button>
+      <button class="action" data-action="disconnectSync">Disconnect</button>
+    </div>`;
 }
 
 /* ---------- actions ---------- */
@@ -817,11 +1053,36 @@ const ACTIONS = {
   openRestore,
   doRestore,
   resetAll() {
-    if (!confirm('Erase all tasks, habits and XP? This cannot be undone.')) return;
+    if (!confirm(`Erase all tasks, habits and XP${sync.token ? ' on all synced devices' : ''}? This cannot be undone.`)) return;
+    const devices = Object.keys(S.xpBy);
     S = freshState();
+    for (const dev of devices) S.xpBy[dev] = { xp: 0, at: Date.now() };
     lastInboxCount = null;
     closeSheet();
     commit();
+  },
+  async connectSync() {
+    const token = $('#syncToken').value.trim();
+    if (!token) { $('#syncToken').focus(); return; }
+    sync = { token };
+    saveSync();
+    await syncNow();
+    if (syncStatus === 'error') {
+      const msg = syncError;
+      sync = {};
+      saveSync();
+      setSyncStatus('off');
+      toast(msg.includes('rejected') ? "That key didn't work. Check you copied all of it." : msg);
+    } else {
+      toast('☁️ Sync is on');
+    }
+  },
+  syncNow,
+  disconnectSync() {
+    if (!confirm('Stop syncing on this device? Your data stays here; other devices keep syncing.')) return;
+    sync = {};
+    saveSync();
+    setSyncStatus('off');
   },
   dismissInstall() {
     S.installHintDismissed = true;
@@ -857,10 +1118,23 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape' && !$('#sheet').hidden) closeSheet();
   // Cmd/Ctrl+Enter saves the brain dump
   if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey) && $('#capText')) ACTIONS.saveCapture();
+  // On a keyboard, "n" opens the brain dump
+  const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName);
+  if (ev.key === 'n' && !typing && !ev.metaKey && !ev.ctrlKey && $('#sheet').hidden) {
+    ev.preventDefault();
+    openCapture();
+  }
 });
 
-// Re-render when the app comes back to the foreground (e.g. after midnight)
-document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
+// Coming back to the app: re-render (e.g. after midnight) and pull changes from other devices
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  render();
+  scheduleSync(0);
+});
+window.addEventListener('focus', () => scheduleSync(0));
+window.addEventListener('online', () => scheduleSync(0));
+setInterval(() => { if (!document.hidden) scheduleSync(0); }, 2 * 60 * 1000);
 
 /* ---------- boot ---------- */
 
@@ -869,7 +1143,10 @@ const standalone = window.navigator.standalone || window.matchMedia('(display-mo
 if (isIOS && !standalone && !S.installHintDismissed) $('#installHint').hidden = false;
 
 lastInboxCount = inboxItems().length;
+baseline();
 render();
+setSyncStatus(syncStatus);
+scheduleSync(0);
 
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {

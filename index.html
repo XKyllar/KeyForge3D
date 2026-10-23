@@ -20,7 +20,10 @@
   <header class="topbar">
     <div class="topbar-row">
       <h1 id="title">Today</h1>
-      <button class="icon-btn" data-action="settings" aria-label="Settings">⚙️</button>
+      <div>
+        <button class="icon-btn" id="syncBtn" data-action="settings" aria-label="Sync status" hidden>☁️</button>
+        <button class="icon-btn" data-action="settings" aria-label="Settings">⚙️</button>
+      </div>
     </div>
     <div class="level" aria-live="polite">
       <span class="lvl" id="lvl">Lv 1</span>
