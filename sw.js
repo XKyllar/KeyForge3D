@@ -1,5 +1,6 @@
-// Offline support: serve the app shell from cache, refresh it in the background.
-const CACHE = 'questlog-v3';
+// Offline support: always try the network first (so updates show up right away),
+// fall back to the cached copy when offline or the network is too slow.
+const CACHE = 'questlog-v4';
 const ASSETS = [
   './',
   './index.html',
@@ -10,9 +11,15 @@ const ASSETS = [
   './icons/icon-512.png',
   './icons/apple-touch-icon.png',
 ];
+const NETWORK_TIMEOUT_MS = 4000;
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // cache: 'reload' skips the browser's HTTP cache so we never store stale files
+  event.waitUntil(
+    caches.open(CACHE)
+      .then((c) => c.addAll(ASSETS.map((url) => new Request(url, { cache: 'reload' }))))
+      .then(() => self.skipWaiting()),
+  );
 });
 
 self.addEventListener('activate', (event) => {
@@ -28,14 +35,17 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
   event.respondWith(
     caches.open(CACHE).then(async (cache) => {
+      const fromNetwork = fetch(req, { cache: 'no-cache' }).then((res) => {
+        if (res.ok) cache.put(req, res.clone());
+        return res;
+      });
+      const timeout = new Promise((resolve) => setTimeout(resolve, NETWORK_TIMEOUT_MS));
+      try {
+        const res = await Promise.race([fromNetwork, timeout]);
+        if (res) return res;
+      } catch (e) { /* offline */ }
       const cached = await cache.match(req, { ignoreSearch: true });
-      const network = fetch(req)
-        .then((res) => {
-          if (res.ok) cache.put(req, res.clone());
-          return res;
-        })
-        .catch(() => cached);
-      return cached || network;
+      return cached || fromNetwork;
     }),
   );
 });

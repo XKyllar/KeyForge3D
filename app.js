@@ -5,6 +5,7 @@
    Everything is stored in localStorage on the device. No accounts, no server.
    ========================================================================= */
 
+const APP_VERSION = '4'; // bump together with CACHE in sw.js
 const STORAGE_KEY = 'questlog.v1';
 const XP_TASK = 10;
 const XP_HABIT = 5;
@@ -578,7 +579,8 @@ function openSettings() {
       <button class="action" data-action="openRestore">♻️ Restore from backup</button>
     </div>
     <p class="hint">A backup is a snapshot file you can keep in iCloud Drive or email to yourself.</p>
-    <button class="danger-btn" data-action="resetAll">Erase everything</button>`);
+    <button class="danger-btn" data-action="resetAll">Erase everything</button>
+    <p class="hint" style="text-align:center">Quest Log version ${APP_VERSION}</p>`);
 }
 
 /* ---------- Apple Notes import ---------- */
@@ -1187,5 +1189,15 @@ scheduleSync(0);
 
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  // When a new version takes over, reload once so it shows up right away.
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloading) return;
+    reloading = true;
+    location.reload();
+  });
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
+    .then((reg) => document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); }))
+    .catch(() => {});
 }
